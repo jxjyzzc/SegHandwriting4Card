@@ -16,11 +16,11 @@
 
 ### 系统要求
 - Linux 操作系统
-- Python 3.6+
+- Python 3.7.4
 - CUDA 支持的 GPU（推荐）
 
 ### 依赖库
-- PaddlePaddle >= 2.0
+- PaddlePaddle = 2.2.2
 - OpenCV
 - NumPy
 - tqdm
