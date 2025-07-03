@@ -1,0 +1,23 @@
+version: '3.8'
+services:
+  seghandwriting-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: seghandwriting-app:latest
+    container_name: seghandwriting-app
+    volumes:
+      - ./data:/app/data
+      - ./work/models:/app/work/models
+      - ./entrypoint.sh:/app/entrypoint.sh
+    runtime: nvidia
+    tty: true
+    stdin_open: true
+    command: /bin/bash -c "/app/entrypoint.sh && tail -f /dev/null"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

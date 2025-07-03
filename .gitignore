@@ -1,4 +1,7 @@
-data/data127971/
+data/*
 __pycache__/
-data/extracted/
+
 venv/*
+.trae
+.env
+Log

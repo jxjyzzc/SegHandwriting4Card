@@ -1,8 +1,9 @@
 matplotlib
-numpy
-opencv-python
-paddleseg
+numpy<2.0.0
+opencv-python==4.5.5.64
+paddleseg==2.6.0
 pandas
 scipy
 tqdm
 visdom
+scikit-learn

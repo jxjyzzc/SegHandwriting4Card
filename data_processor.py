@@ -227,7 +227,7 @@ def parse_arguments():
                        default=os.path.join(project_root, 'data', 'data127971'),
                        help='原始数据集压缩包所在目录')
     parser.add_argument('--extract_root', type=str,
-                       default=os.path.join(project_root, 'data', 'extracted'),
+                       default=os.path.join(project_root, 'work', 'data'),
                        help='解压目标根目录')
     parser.add_argument('--train_ratio', type=float, default=0.8,
                        help='训练集比例 (默认: 0.8)')

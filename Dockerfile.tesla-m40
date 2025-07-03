@@ -1,0 +1,117 @@
+# Tesla M40 优化版 Dockerfile
+# 针对 Tesla M40 (Compute Capability 5.2) 优化
+# 使用 CUDA 11.8 确保兼容性
+
+# 1. 使用 CUDA 11.8 兼容的基础镜像
+FROM ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:3.0.0-gpu-cuda11.8-cudnn8.9-trt8.6
+
+# 2. 设置工作目录并配置镜像源
+WORKDIR /app
+RUN sed -i 's|http://.*archive.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    sed -i 's|http://.*security.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
+
+# 3. 安装必要的编译和运行依赖
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    git \
+    cmake \
+    ninja-build \
+    gcc \
+    g++ \
+    make \
+    wget \
+    ca-certificates && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 4. 安装 CUDA 11.8 工具链（Tesla M40 兼容）
+RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.0-1_all.deb && \
+    dpkg -i cuda-keyring_1.0-1_all.deb && \
+    apt-get update && \
+    apt-get install -y \
+        cuda-compiler-11-8 \
+        cuda-libraries-dev-11-8 \
+        cuda-driver-dev-11-8 \
+        cuda-cudart-dev-11-8 \
+        libcublas-dev-11-8 \
+        libcurand-dev-11-8 \
+        libcusparse-dev-11-8 \
+        libcufft-dev-11-8 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    rm cuda-keyring_1.0-1_all.deb
+
+# 5. 设置 CUDA 11.8 环境变量
+ENV PATH=/usr/local/cuda-11.8/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:${LD_LIBRARY_PATH}
+ENV CUDA_HOME=/usr/local/cuda-11.8
+ENV CUDAToolkit_ROOT=/usr/local/cuda-11.8
+
+# 6. 克隆 PaddlePaddle 源码（使用浅克隆减少网络流量）
+RUN git config --global http.sslVerify false && \
+    git clone --depth 1 --branch develop https://gitee.com/paddlepaddle/Paddle.git && \
+    cd Paddle && \
+    echo "PaddlePaddle 源码克隆完成，使用浅克隆节省网络流量"
+
+# 7. 编译和安装 PaddlePaddle（Tesla M40 特定优化）
+RUN cd Paddle && \
+    mkdir -p build && \
+    cd build && \
+    cmake .. -GNinja \
+        -DPY_VERSION=3.10 \
+        -DWITH_GPU=ON \
+        -DWITH_TESTING=OFF \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DON_INFER=ON \
+        -DWITH_PYTHON=ON \
+        -DWITH_MKLDNN=ON \
+        -DWITH_DISTRIBUTE=OFF \
+        -DWITH_PSCORE=OFF \
+        -DCUDA_ARCH_NAME=Manual \
+        -DCUDA_ARCH_BIN="52" \
+        -DCUDA_ARCH_PTX="52" \
+        -DWITH_TENSORRT=OFF && \
+    echo "开始编译 PaddlePaddle，针对 Tesla M40 (Compute Capability 5.2) 优化" && \
+    ninja -j$(($(nproc)/2)) && \
+    cd python/dist && \
+    pip install paddlepaddle_gpu-*.whl && \
+    echo "PaddlePaddle 编译安装完成"
+
+# 8. 清理编译文件以减少镜像大小
+RUN cd /app && \
+    rm -rf Paddle && \
+    echo "清理编译文件完成"
+
+# 9. 安装项目依赖
+COPY . /app/
+RUN pip install --no-cache-dir -r work/requirement.txt && \
+    chmod +x /app/entrypoint.sh
+
+# 10. 设置 Tesla M40 特定的运行时环境
+ENV CUDA_VISIBLE_DEVICES=0
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# 11. 添加 Tesla M40 验证脚本
+RUN echo '#!/bin/bash\n\
+echo "=== Tesla M40 环境验证 ===\"\n\
+echo "CUDA 版本:"\n\
+nvcc --version\n\
+echo "\nGPU 信息:"\n\
+nvidia-smi\n\
+echo "\nPaddlePaddle GPU 支持:"\n\
+python -c "import paddle; print(f\"GPU 设备数量: {paddle.device.cuda.device_count()}\"); print(f\"GPU 设备名称: {paddle.device.cuda.get_device_name()}\")"\n\
+echo "\n=== 验证完成 ===\"' > /app/verify_tesla_m40.sh && \
+    chmod +x /app/verify_tesla_m40.sh
+
+# 12. 启动命令
+CMD ["/bin/bash"]
+
+# Tesla M40 优化说明：
+# - 使用 CUDA 11.8 确保与 Tesla M40 兼容
+# - 添加 Compute Capability 5.2 特定编译参数
+# - 使用浅克隆减少网络流量（节省约 2GB）
+# - 精简 CUDA 组件安装（减少约 500MB 下载）
+# - 编译后清理源码文件减少镜像大小
+# - 添加环境验证脚本

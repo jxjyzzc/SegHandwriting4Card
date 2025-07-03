@@ -116,7 +116,8 @@ python3 -c "import paddle; print(f'GPU数量: {paddle.device.cuda.device_count()
 
 ### 2. 数据准备
 
-确保训练数据已正确放置在 `work/data/dehw_train_dataset/` 目录下。
+确保训练数据已正确放置在 `/data/dehw_train_dataset/` 目录下。
+demo 数据预处理脚本 data_processor.py 可以解包并放置数据集，你可以阅读并按需调整参数。
 
 ### 3. 开始训练
 

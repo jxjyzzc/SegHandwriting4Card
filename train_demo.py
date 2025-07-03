@@ -247,10 +247,10 @@ def parse_arguments():
                        default=os.path.join(project_root, 'data', 'data127971'),
                        help='原始数据集压缩包所在目录')
     parser.add_argument('--extract_root', type=str,
-                       default=os.path.join(project_root, 'data', 'extracted'),
+                       default=os.path.join(project_root, 'work', 'data'),
                        help='解压目标根目录')
     parser.add_argument('--dataRoot', type=str, 
-                        default=os.path.join(project_root, 'data', 'extracted', 'train'), 
+                        default=os.path.join(project_root, 'work', 'data', 'train'), 
                         help='数据根目录')
 
     parser.add_argument('--num_epochs', type=int, default=10, help='训练轮数')
