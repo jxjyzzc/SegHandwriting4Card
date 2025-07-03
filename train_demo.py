@@ -34,8 +34,11 @@ import paddle.nn.functional as F
 from dataloader import ErasingData
 from utils import AverageMeter
 from model import segformer_b1, segformer_b2
-from loss import MaskLoss
+# from loss import MaskLoss  # 注释掉原始损失函数
 import visdom
+from visualdl import LogWriter
+import json
+from collections import defaultdict
 
 # 可用模型字典
 MODEL = {
@@ -46,48 +49,287 @@ MODEL = {
 class Session:
     def __init__(self, config):
         self.config = config
-        self.device = paddle.set_device('gpu' if paddle.is_compiled_with_cuda() else 'cpu')
-        self.net = MODEL[config.arch]()
+        
+        # GPU 兼容性检测
+        self.device = self._setup_device()
+        print(f"使用设备: {self.device}")
+        # 手写笔迹分割任务只需要1个类别（手写笔迹）
+        self.net = MODEL[config.arch](num_classes=1, pretrained=False)
         self.best_loss = float('inf')
-        self.criterion = MaskLoss()
+        self.criterion = self._create_compatible_loss()
         self.scheduler = paddle.optimizer.lr.MultiStepDecay(learning_rate=self.config.lr, milestones=[100, 200], gamma=0.1)
         self.optimizer = paddle.optimizer.AdamW(learning_rate=self.scheduler, parameters=self.net.parameters(), weight_decay=self.config.wd)
-        self.prepare_dataset()
+        # 数据集已由entrypoint.sh中的data_processor.py处理，这里只需加载
         self.train_dataloader, self.val_dataloader = self.load_datasets()
 
         paddle.seed(2022)
         np.random.seed(2022)
         random.seed(2022)
 
-        if self.config.show_visdom:
-            import visdom
-            self.plotter = visdom.Visdom(env='main', port=7000)
+        # 训练监控数据
+        self.training_stats = {
+            'train_losses': [],
+            'val_losses': [],
+            'learning_rates': [],
+            'epoch_times': [],
+            'model_stats': defaultdict(list)
+        }
 
         os.makedirs(os.path.join(self.config.modelsSavePath, self.config.arch), exist_ok=True)
         self.timestamp = time.strftime('%m%d%H%M', time.localtime(time.time()))
+        
+        # 创建日志目录
+        self.log_dir = os.path.join(self.config.modelsSavePath, f'logs_{self.timestamp}')
+        os.makedirs(self.log_dir, exist_ok=True)
+        
+        # 初始化可视化组件（在log_dir创建之后）
+        self.setup_visualization()
 
         params = np.sum([p.numel() for p in self.net.parameters()]).item() * 4 /1024/1024
         print(f"Loaded Enhance Net parameters : {params:.3e} MB")
+        print(f'模型参数量: {params:.2f}MB')
+        print(f'模型保存路径: {os.path.join(self.config.modelsSavePath, self.config.arch)}')
+        print(f'时间戳: {self.timestamp}')
+        print(f'日志保存路径: {self.log_dir}')
+        
+    def setup_visualization(self):
+        """设置可视化组件"""
+        # 设置 VisualDL 日志记录器
+        self.visualdl_writer = LogWriter(logdir=self.log_dir)
+        
+        # 可选的 Visdom 支持
+        if self.config.show_visdom:
+            import visdom
+            self.plotter = visdom.Visdom(env='main', port=7000)
+        else:
+            self.plotter = None
+            
+        print(f'VisualDL 日志目录: {self.log_dir}')
+        print('训练完成后可使用以下命令启动 VisualDL 服务:')
+        print(f'visualdl --logdir {self.log_dir} --port 8040')
+        
+    def log_training_stats(self, epoch, train_loss, val_loss=None, lr=None, epoch_time=None):
+        """记录训练统计信息"""
+        # 记录到内存
+        self.training_stats['train_losses'].append(train_loss)
+        if val_loss is not None:
+            self.training_stats['val_losses'].append(val_loss)
+        if lr is not None:
+            self.training_stats['learning_rates'].append(lr)
+        if epoch_time is not None:
+            self.training_stats['epoch_times'].append(epoch_time)
+            
+        # 记录到 VisualDL
+        self.visualdl_writer.add_scalar('Loss/Train', train_loss, epoch)
+        if val_loss is not None:
+            self.visualdl_writer.add_scalar('Loss/Validation', val_loss, epoch)
+        if lr is not None:
+            self.visualdl_writer.add_scalar('Learning_Rate', lr, epoch)
+        if epoch_time is not None:
+            self.visualdl_writer.add_scalar('Time/Epoch_Duration', epoch_time, epoch)
+            
+        # 记录模型参数统计
+        self.log_model_stats(epoch)
+        
+        # 保存统计数据到文件
+        stats_file = os.path.join(self.log_dir, 'training_stats.json')
+        with open(stats_file, 'w', encoding='utf-8') as f:
+            json.dump(self.training_stats, f, indent=2, ensure_ascii=False)
+            
+    def log_model_stats(self, epoch):
+        """记录模型参数统计信息"""
+        total_params = 0
+        grad_norm = 0
+        param_norm = 0
+        
+        for name, param in self.net.named_parameters():
+            if param.grad is not None:
+                grad_norm += param.grad.norm().item() ** 2
+            param_norm += param.norm().item() ** 2
+            total_params += param.numel()
+            
+        grad_norm = grad_norm ** 0.5
+        param_norm = param_norm ** 0.5
+        
+        self.training_stats['model_stats']['grad_norm'].append(grad_norm)
+        self.training_stats['model_stats']['param_norm'].append(param_norm)
+        self.training_stats['model_stats']['total_params'].append(total_params)
+        
+        # 记录到 VisualDL
+        self.visualdl_writer.add_scalar('Model/Gradient_Norm', grad_norm, epoch)
+        self.visualdl_writer.add_scalar('Model/Parameter_Norm', param_norm, epoch)
+        if epoch == 0:  # 只在第一个epoch记录总参数量
+            self.visualdl_writer.add_scalar('Model/Total_Parameters', total_params, epoch)
+        
+        if epoch % 10 == 0:  # 每10个epoch打印一次
+            print(f'Epoch {epoch}: Grad Norm: {grad_norm:.6f}, Param Norm: {param_norm:.6f}')
+            
+    def plot_training_curves(self, save_path=None):
+        """使用VisualDL记录训练曲线，不再使用matplotlib"""
+        print(f'训练统计信息已记录到VisualDL，日志目录: {self.log_dir}')
+        print('可使用以下命令查看训练曲线:')
+        print(f'visualdl --logdir {self.log_dir} --port 8040')
+        
+    def plot_realtime_loss(self, epoch, train_loss, val_loss=None):
+        """实时绘制损失曲线（使用visdom）"""
+        if self.plotter is not None:
+            # 绘制训练损失
+            self.plotter.line(
+                X=[epoch],
+                Y=[train_loss],
+                win='train_loss',
+                name='train_loss',
+                update='append' if epoch > 0 else None,
+                opts=dict(title='训练损失', xlabel='Epoch', ylabel='Loss')
+            )
+            
+            # 绘制验证损失
+            if val_loss is not None:
+                self.plotter.line(
+                    X=[epoch],
+                    Y=[val_loss],
+                    win='val_loss',
+                    name='val_loss',
+                    update='append' if epoch > 0 else None,
+                    opts=dict(title='验证损失', xlabel='Epoch', ylabel='Loss')
+                )
+                
+    def save_training_summary(self):
+        """保存训练总结报告"""
+        summary = {
+            'timestamp': self.timestamp,
+            'model_arch': self.config.arch,
+            'total_epochs': len(self.training_stats['train_losses']),
+            'final_train_loss': self.training_stats['train_losses'][-1] if self.training_stats['train_losses'] else None,
+            'final_val_loss': self.training_stats['val_losses'][-1] if self.training_stats['val_losses'] else None,
+            'min_train_loss': min(self.training_stats['train_losses']) if self.training_stats['train_losses'] else None,
+            'min_val_loss': min(self.training_stats['val_losses']) if self.training_stats['val_losses'] else None,
+            'total_training_time': sum(self.training_stats['epoch_times']) if self.training_stats['epoch_times'] else None,
+            'avg_epoch_time': np.mean(self.training_stats['epoch_times']) if self.training_stats['epoch_times'] else None
+        }
+        
+        summary_file = os.path.join(self.log_dir, 'training_summary.json')
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+            
+        print(f'训练总结已保存到: {summary_file}')
 
-        if self.config.parallel:
+        # 并行训练设置
+        if self.config.parallel and 'gpu' in str(self.device):
             numOfGPUs = paddle.device.cuda.device_count()
             if numOfGPUs > 1:
                 self.net = paddle.DataParallel(self.net, device_ids=list(range(numOfGPUs)))
                 self.criterion = paddle.DataParallel(self.criterion, device_ids=list(range(numOfGPUs)))
             else:
                 self.config.parallel = False
+        else:
+            self.config.parallel = False
+            
+    def _setup_device(self):
+        """
+        设置计算设备，包含 GPU 兼容性检测
+        """
+        # 检查是否强制使用 CPU
+        if os.environ.get('CUDA_VISIBLE_DEVICES') == '' or os.environ.get('PADDLE_USE_GPU') == '0':
+            print("检测到 CPU 模式环境变量，使用 CPU")
+            return paddle.set_device('cpu')
+            
+        # 检查 CUDA 是否可用
+        if not paddle.is_compiled_with_cuda():
+            print("PaddlePaddle 未编译 CUDA 支持，使用 CPU")
+            return paddle.set_device('cpu')
+            
+        # 检查是否有 GPU 设备
+        if paddle.device.cuda.device_count() == 0:
+            print("未检测到 CUDA 设备，使用 CPU")
+            return paddle.set_device('cpu')
+            
+        # 尝试 GPU 兼容性测试
+        try:
+            device = paddle.set_device('gpu:0')
+            # 创建测试张量验证 GPU 兼容性
+            test_tensor = paddle.ones([2, 2])
+            result = test_tensor + 1
+            print(f"GPU 兼容性检测通过，使用 GPU: {device}")
+            return device
+        except Exception as e:
+            print(f"GPU 兼容性检测失败: {e}")
+            print("自动切换到 CPU 模式")
+            # 设置环境变量强制使用 CPU
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
+            os.environ['PADDLE_USE_GPU'] = '0'
+            return paddle.set_device('cpu')
+
+    def _create_compatible_loss(self):
+        """
+        创建兼容的损失函数，基于main.ipynb中的设计：L = L_ce + λ × L_dice，其中λ=0.5
+        避免work/loss.py中的布尔索引问题
+        """
+        class CompatibleMaskLoss(nn.Layer):
+            def __init__(self, lambda_dice=0.5):
+                super(CompatibleMaskLoss, self).__init__()
+                self.lambda_dice = lambda_dice  # Dice Loss权重系数
+                self.ce_loss = nn.BCELoss()  # 交叉熵损失（二分类使用BCE）
+            
+            def dice_loss(self, input, target):
+                """
+                Dice Loss计算，针对细化结构进行有效惩罚
+                """
+                input = input.reshape((input.shape[0], -1))
+                target = target.reshape((target.shape[0], -1))
+                
+                intersection = paddle.sum(input * target, axis=1)
+                union = paddle.sum(input, axis=1) + paddle.sum(target, axis=1)
+                
+                # 避免除零错误
+                dice_coeff = (2.0 * intersection + 1e-7) / (union + 1e-7)
+                dice_loss = 1.0 - paddle.mean(dice_coeff)
+                return dice_loss
+            
+            def forward(self, pred_mask, mask, img):
+                """
+                损失函数前向传播：L = L_ce + λ × L_dice
+                """
+                # 确保预测输出和标签形状匹配
+                # 模型输出已经通过Sigmoid激活，范围在[0,1]
+                # pred_mask: [batch_size, 1, height, width]
+                # mask: [batch_size, 1, height, width]
+                
+                # 使用元素级乘法代替布尔索引，避免维度不匹配问题
+                valid_region = (paddle.min(img, axis=1, keepdim=True) < 0.5).astype('float32')
+                
+                # 对有效区域计算损失
+                pred_valid = pred_mask * valid_region
+                mask_valid = mask * valid_region
+                
+                # 计算交叉熵损失 L_ce
+                ce_loss = self.ce_loss(pred_valid, mask_valid)
+                
+                # 计算Dice损失 L_dice
+                dice_loss = self.dice_loss(pred_valid, mask_valid)
+                
+                # 组合损失：L = L_ce + λ × L_dice
+                total_loss = ce_loss + self.lambda_dice * dice_loss
+                
+                return total_loss
+        
+        return CompatibleMaskLoss()
 
     def prepare_dataset(self):
         """
-        准备数据集：解压和生成CSV文件
+        检查数据集是否已准备就绪（实际处理由entrypoint.sh完成）
         """
-        print("=== 准备数据集 ===")
+        print("=== 检查数据集状态 ===")
         
-        # 创建数据处理器并处理数据集
-        processor = DatasetProcessor(self.config.data_root, self.config.extract_root)
-        processor.process_all_datasets()
+        # 检查数据集是否已解压
+        train_data_path = os.path.join(self.config.extract_root, 'train')
+        if os.path.exists(train_data_path):
+            print(f"✅ 训练数据集已存在: {train_data_path}")
+        else:
+            print(f"❌ 训练数据集不存在: {train_data_path}")
+            print("提示: 数据集应由entrypoint.sh中的data_processor.py处理")
         
-        print("=== 数据集准备完成 ===")
+        print("=== 数据集检查完成 ===")
     
 
 
@@ -105,14 +347,16 @@ class Session:
             train_dataset,
             batch_size=self.config.batchSize,
             shuffle=True,
-            num_workers=self.config.numOfWorkers
+            num_workers=0,
+            use_shared_memory=False
         )
         val_dataset = ErasingData(self.config.dataRoot, self.config.loadSize, training=False)
         val_dataloader = paddle.io.DataLoader(
             val_dataset,
             batch_size=self.config.batchSize,
             shuffle=False,
-            num_workers=self.config.numOfWorkers
+            num_workers=0,
+            use_shared_memory=False
         )
         return train_dataloader, val_dataloader
 
@@ -166,24 +410,53 @@ class Session:
         }
         
     def train_epoch(self, epoch):
+        epoch_start_time = time.time()
         self.net.train()
         total_loss = 0
+        
         for i, data in enumerate(self.train_dataloader):
-            data = {k:v.to(self.device) for k,v in data.items()}
+            data = {k:v.to(self.device) if hasattr(v, 'to') else v for k,v in data.items()}
             output = self.forward(data)
             loss = output['loss']
             self.optimizer.clear_grad()
             loss.backward()
             self.optimizer.step()
             total_loss += loss.item()
-        print(f"Epoch {epoch+1} Train Loss: {total_loss / len(self.train_dataloader):.4f}")
+            
+            if i % 10 == 0:
+                current_lr = self.optimizer.get_lr()
+                print(f'Epoch [{epoch+1}/{self.config.num_epochs}], Step [{i+1}/{len(self.train_dataloader)}], Loss: {loss.item():.4f}, LR: {current_lr:.6f}')
+                
+                # 每10个step记录一次数据到VisualDL
+                step_global = epoch * len(self.train_dataloader) + i
+                self.visualdl_writer.add_scalar('Loss/Train_Step', loss.item(), step_global)
+                self.visualdl_writer.add_scalar('Learning_Rate_Step', current_lr, step_global)
+                self.visualdl_writer.flush()
+        
+        # 计算平均损失和epoch时间
+        avg_train_loss = total_loss / len(self.train_dataloader)
+        epoch_time = time.time() - epoch_start_time
+        current_lr = self.optimizer.get_lr()
+        
+        print(f"Epoch {epoch+1} Train Loss: {avg_train_loss:.4f}, 耗时: {epoch_time:.2f}s")
+        
+        # 记录训练统计信息
+        self.log_training_stats(epoch, avg_train_loss, lr=current_lr, epoch_time=epoch_time)
+        
+        # 强制刷新 VisualDL 缓冲区
+        self.visualdl_writer.flush()
+        
+        # 实时可视化（如果启用visdom）
+        self.plot_realtime_loss(epoch, avg_train_loss)
+        
+        return avg_train_loss
         
     def eval_epoch(self, epoch):
         self.net.eval()
         total_loss = 0
         with paddle.no_grad():
             for i, data in enumerate(self.val_dataloader):
-                data = {k:v.to(self.device) for k,v in data.items()}
+                data = {k:v.to(self.device) if hasattr(v, 'to') else v for k,v in data.items()}
                 output = self.forward(data)
                 loss = output['loss']
                 total_loss += loss.item()
@@ -209,14 +482,36 @@ class Session:
         if self.config.train:
             print('start training')
             for epoch in range(self.config.num_epochs):
-                self.train_epoch(epoch)
+                train_loss = self.train_epoch(epoch)
                 val_loss = self.eval_epoch(epoch)
+                
+                # 更新训练统计信息（添加验证损失）
+                if len(self.training_stats['train_losses']) > epoch:
+                    self.training_stats['val_losses'].append(val_loss)
+                
+                # 记录验证损失到 VisualDL
+                self.visualdl_writer.add_scalar('Loss/Validation', val_loss, epoch)
+                self.visualdl_writer.flush()
+                
+                # 实时可视化验证损失
+                self.plot_realtime_loss(epoch, train_loss, val_loss)
+                
                 if val_loss < self.best_loss:
                     self.best_loss = val_loss
                     self.save_model(epoch, is_best=True)
+                    
                 if (epoch + 1) % self.config.show_epoch == 0:
                     self.save_model(epoch)
+                    # 每show_epoch个epoch生成训练曲线图
+                    self.plot_training_curves()
+                    
+            # 训练结束后生成最终报告
+            self.plot_training_curves()
+            self.save_training_summary()
+            # 关闭VisualDL writer
+            self.visualdl_writer.close()
             print('finish training')
+            print(f"训练日志和可视化文件保存在: {self.log_dir}")
         else:
             print('start predicting')
             self.generate_mask()

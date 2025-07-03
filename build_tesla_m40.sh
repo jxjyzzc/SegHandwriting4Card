@@ -8,13 +8,15 @@ set -e
 
 # 默认配置
 IMAGE_NAME="seghandwriting-app"
-IMAGE_TAG="tesla-m40"
+IMAGE_TAG="latest"
 DOCKERFILE="Dockerfile.tesla-m40"
 VERBOSE=false
 NO_CACHE=false
 CLEAN_CACHE=false
 SHOW_HELP=false
 VERIFY_GPU=false
+RUN_CONTAINER=true
+ONLY_RUN=false
 
 # 颜色定义
 RED='\033[0;31m'
@@ -63,6 +65,8 @@ PaddlePaddle Docker 构建脚本 - Tesla M40 优化版
   --no-cache              构建时不使用缓存
   --clean-cache           构建前清理 Docker 缓存
   --verify-gpu            构建完成后验证 GPU 支持
+  --no-run                只构建镜像，不启动容器
+  --only-run              跳过构建，只启动容器（镜像必须已存在）
   --original              使用原始 Dockerfile (不推荐用于 Tesla M40)
 
 Tesla M40 优化特性:
@@ -81,6 +85,8 @@ Tesla M40 优化特性:
   $0 --verbose            # 启用详细输出
   $0 --verify-gpu         # 构建后验证 GPU 支持
   $0 --clean-cache        # 清理缓存后构建
+  $0 --no-run             # 只构建镜像，不启动容器
+  $0 --only-run           # 跳过构建，只启动容器
 
 EOF
 }
@@ -207,6 +213,51 @@ verify_gpu_support() {
     else
         log_error "Tesla M40 GPU 验证失败"
         log_warning "请检查 NVIDIA 驱动和 Docker GPU 支持"
+    fi
+}
+
+# 启动容器
+run_container() {
+    local full_image_name="${IMAGE_NAME}:${IMAGE_TAG}"
+    local container_name="seghandwriting-app"
+    
+    log_tesla "启动 Tesla M40 优化容器..."
+    
+    # 停止并删除已存在的容器
+    if docker ps -a --format "{{.Names}}" | grep -q "^${container_name}$"; then
+        log_info "停止并删除已存在的容器: $container_name"
+        docker stop "$container_name" &>/dev/null || true
+        docker rm "$container_name" &>/dev/null || true
+    fi
+    
+    # 启动新容器
+    local run_cmd="docker run -d \\
+        --name $container_name \\
+        --gpus all \\
+        --runtime nvidia \\
+        -it \\
+        -v $(pwd)/data:/app/data \\
+        -v $(pwd)/work:/app/work \\
+        -v $(pwd)/entrypoint.sh:/app/entrypoint.sh \\
+        -v $(pwd)/gpu_check.py:/app/gpu_check.py \\
+        -v $(pwd)/data_processor.py:/app/data_processor.py \\
+        -v $(pwd)/train_demo.py:/app/train_demo.py \\
+        -e DATA_ROOT=/app/data \\
+        -e EXTRACT_ROOT=/app/work/data \\
+        $full_image_name \\
+        /bin/bash -c '/app/entrypoint.sh'"
+    
+    log_info "启动命令: $run_cmd"
+    
+    if eval "$run_cmd"; then
+        log_success "容器启动成功: $container_name"
+        log_info "查看容器状态: docker ps"
+        log_info "查看容器日志: docker logs -f $container_name"
+        log_info "进入容器: docker exec -it $container_name /bin/bash"
+        return 0
+    else
+        log_error "容器启动失败"
+        return 1
     fi
 }
 
@@ -374,6 +425,14 @@ while [[ $# -gt 0 ]]; do
             VERIFY_GPU=true
             shift
             ;;
+        --no-run)
+            RUN_CONTAINER=false
+            shift
+            ;;
+        --only-run)
+            ONLY_RUN=true
+            shift
+            ;;
         --original)
             DOCKERFILE="Dockerfile"
             IMAGE_TAG="latest"
@@ -422,8 +481,28 @@ main() {
         clean_docker_cache
     fi
     
-    # 构建镜像
-    if build_image; then
+    # 构建镜像（如果需要）
+    if [[ "$ONLY_RUN" == "true" ]]; then
+        local full_image_name="${IMAGE_NAME}:${IMAGE_TAG}"
+        log_tesla "跳过构建，检查镜像是否存在: $full_image_name"
+        
+        if docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^${full_image_name}$"; then
+            log_success "镜像已存在: $full_image_name"
+            
+            # 启动容器
+            if run_container; then
+                log_success "Tesla M40 优化容器已启动并运行!"
+            else
+                log_error "容器启动失败"
+                exit 1
+            fi
+            exit 0
+        else
+            log_error "镜像不存在: $full_image_name"
+            log_info "请先构建镜像: $0 --no-run"
+            exit 1
+        fi
+    elif build_image; then
         log_success "Tesla M40 优化构建流程完成!"
         
         if [[ "$DOCKERFILE" == "Dockerfile.tesla-m40" ]]; then
@@ -435,6 +514,19 @@ main() {
         # GPU 验证（如果需要）
         if [[ "$VERIFY_GPU" == "true" ]]; then
             verify_gpu_support
+        fi
+        
+        # 启动容器（如果需要）
+        if [[ "$RUN_CONTAINER" == "true" ]]; then
+            if run_container; then
+                log_success "Tesla M40 优化容器已启动并运行!"
+            else
+                log_error "容器启动失败"
+                exit 1
+            fi
+        else
+            log_info "跳过容器启动（使用了 --no-run 选项）"
+            log_info "手动启动容器: docker run -d --name seghandwriting-app --gpus all --runtime nvidia -it -v \$(pwd)/data:/app/data -v \$(pwd)/work:/app/work -v \$(pwd)/entrypoint.sh:/app/entrypoint.sh -v \$(pwd)/gpu_check.py:/app/gpu_check.py -v \$(pwd)/data_processor.py:/app/data_processor.py -v \$(pwd)/train_demo.py:/app/train_demo.py -e DATA_ROOT=/app/data -e EXTRACT_ROOT=/app/work/data ${IMAGE_NAME}:${IMAGE_TAG} /bin/bash -c '/app/entrypoint.sh'"
         fi
         
         exit 0

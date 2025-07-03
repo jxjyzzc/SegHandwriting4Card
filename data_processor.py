@@ -122,7 +122,7 @@ class DatasetProcessor:
         train_data = csv_data[:split_idx]
         val_data = csv_data[split_idx:]
         
-        # 生成CSV文件
+        # 生成CSV文件 - 在实际数据集目录中
         train_csv = os.path.join(actual_dataset_dir, 'train.csv')
         val_csv = os.path.join(actual_dataset_dir, 'test.csv')  # 使用test.csv作为验证集
         
@@ -143,6 +143,22 @@ class DatasetProcessor:
                     writer.writerow([row[0]])  # 只写入图像路径
                 else:  # 测试集格式
                     writer.writerow(row)
+        
+        # 强制复制CSV文件到训练脚本期望的位置
+        # 训练脚本期望在 dataset_root 目录下找到 train.csv 和 test.csv
+        target_train_csv = os.path.join(dataset_root, 'train.csv')
+        target_test_csv = os.path.join(dataset_root, 'test.csv')
+        
+        import shutil
+        try:
+            # 强制复制，覆盖已存在的文件
+            shutil.copy2(train_csv, target_train_csv)
+            shutil.copy2(val_csv, target_test_csv)
+            print(f"✅ CSV文件已成功复制到训练脚本期望位置:")
+            print(f"   训练集: {target_train_csv}")
+            print(f"   验证集: {target_test_csv}")
+        except Exception as e:
+            print(f"❌ 复制CSV文件时出错: {e}")
         
         print(f"生成训练集CSV: {train_csv} ({len(train_data)} 个样本)")
         print(f"生成验证集CSV: {val_csv} ({len(val_data)} 个样本)")
@@ -166,14 +182,19 @@ class DatasetProcessor:
         
         image_files = sorted([str(f) for f in image_files])
         
-        # 生成测试CSV
+        # 生成测试CSV - 在实际数据集目录中
         test_csv = os.path.join(actual_dataset_dir, 'test.csv')
-        with open(test_csv, 'w', newline='') as f:
-            writer = csv.writer(f)
-            for img_path in image_files:
-                writer.writerow([img_path])
+        # 同时在父目录（训练脚本期望的位置）生成CSV文件
+        parent_test_csv = os.path.join(dataset_root, 'test.csv')
+        
+        for csv_path in [test_csv, parent_test_csv]:
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                for img_path in image_files:
+                    writer.writerow([img_path])
         
         print(f"生成测试集CSV: {test_csv} ({len(image_files)} 个样本)")
+        print(f"同时复制到父目录: {parent_test_csv}")
         return test_csv
 
     def process_all_datasets(self):
@@ -222,12 +243,16 @@ def parse_arguments():
     script_path = os.path.abspath(__file__)
     project_root = os.path.dirname(script_path)
 
+    # 从环境变量获取路径，默认为项目内路径
+    default_data_root = os.getenv('DATA_ROOT', os.path.join(project_root, 'data', 'data127971'))
+    default_extract_root = os.getenv('EXTRACT_ROOT', os.path.join(project_root, 'work', 'data'))
+    
     parser = argparse.ArgumentParser(description='数据集处理脚本')
     parser.add_argument('--data_root', type=str, 
-                       default=os.path.join(project_root, 'data', 'data127971'),
+                       default=default_data_root,
                        help='原始数据集压缩包所在目录')
     parser.add_argument('--extract_root', type=str,
-                       default=os.path.join(project_root, 'work', 'data'),
+                       default=default_extract_root,
                        help='解压目标根目录')
     parser.add_argument('--train_ratio', type=float, default=0.8,
                        help='训练集比例 (默认: 0.8)')

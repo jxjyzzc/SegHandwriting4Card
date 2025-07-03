@@ -1,19 +1,28 @@
-version: '3.8'
 services:
   seghandwriting-app:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.tesla-m40  # 使用特制Dockerfile
     image: seghandwriting-app:latest
     container_name: seghandwriting-app
+    ports:
+      - "8040:8040"  # VisualDL 服务端口
     volumes:
       - ./data:/app/data
-      - ./work/models:/app/work/models
+      - ./work:/app/work
       - ./entrypoint.sh:/app/entrypoint.sh
+      - ./gpu_check.py:/app/gpu_check.py
+      - ./data_processor.py:/app/data_processor.py
+      - ./train_demo.py:/app/train_demo.py
+    environment:
+      # 数据集压缩包所在目录（映射到宿主机 ./data 目录）
+      - DATA_ROOT=/app/data
+      # 数据集解压目标目录（映射到宿主机 ./work/data 目录）
+      - EXTRACT_ROOT=/app/work/data
     runtime: nvidia
     tty: true
     stdin_open: true
-    command: /bin/bash -c "/app/entrypoint.sh && tail -f /dev/null"
+    command: /bin/bash -c "/app/entrypoint.sh"
     deploy:
       resources:
         reservations:

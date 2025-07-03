@@ -21,13 +21,21 @@ RUN apt-get update && \
     g++ \
     make \
     wget \
-    ca-certificates && \
+    ca-certificates \
+    python3-pip \
+    python3-wheel && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    pip3 install --upgrade pip wheel
 
-# 4. 安装 CUDA 11.8 工具链（Tesla M40 兼容）
+# 4. 安装 CUDA 11.8 工具链和NVIDIA驱动库
 RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.0-1_all.deb && \
     dpkg -i cuda-keyring_1.0-1_all.deb && \
+    mkdir -p /etc/apt/sources.list.d && \
+    touch /etc/apt/sources.list.d/cuda.list && \
+    touch /etc/apt/sources.list.d/nvidia-ml.list && \
+    sed -i 's|https://.*developer.download.nvidia.com|https://mirrors.aliyun.com/nvidia-cuda|g' /etc/apt/sources.list.d/cuda.list && \
+    sed -i 's|https://.*developer.download.nvidia.com|https://mirrors.aliyun.com/nvidia-cuda|g' /etc/apt/sources.list.d/nvidia-ml.list && \
     apt-get update && \
     apt-get install -y \
         cuda-compiler-11-8 \
@@ -37,7 +45,9 @@ RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86
         libcublas-dev-11-8 \
         libcurand-dev-11-8 \
         libcusparse-dev-11-8 \
-        libcufft-dev-11-8 && \
+        libcufft-dev-11-8 \
+        libnvidia-compute-470 \
+        nvidia-utils-470 && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     rm cuda-keyring_1.0-1_all.deb
@@ -48,52 +58,33 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda-11.8/lib64:${LD_LIBRARY_PATH}
 ENV CUDA_HOME=/usr/local/cuda-11.8
 ENV CUDAToolkit_ROOT=/usr/local/cuda-11.8
 
-# 6. 克隆 PaddlePaddle 源码（使用浅克隆减少网络流量）
-RUN git config --global http.sslVerify false && \
-    git clone --depth 1 --branch develop https://gitee.com/paddlepaddle/Paddle.git && \
-    cd Paddle && \
-    echo "PaddlePaddle 源码克隆完成，使用浅克隆节省网络流量"
+# 6. 验证基础镜像中的PaddlePaddle安装并配置 Maxwell 架构支持
+RUN python3 -c "import paddle; print(f'PaddlePaddle版本: {paddle.__version__}'); print(f'GPU支持: {paddle.device.cuda.device_count() > 0}')" && \
+    echo "PaddlePaddle验证完成" && \
+    echo "配置 Maxwell 架构 (Compute Capability 5.2) 支持..." && \
+    echo 'export CUDA_ARCH_LIST="5.2;6.0;6.1;7.0;7.5;8.0;8.6"' >> /etc/environment && \
+    echo 'export PADDLE_WITH_CUDA=ON' >> /etc/environment && \
+    echo 'export FLAGS_fraction_of_gpu_memory_to_use=0.8' >> /etc/environment
 
-# 7. 编译和安装 PaddlePaddle（Tesla M40 特定优化）
-RUN cd Paddle && \
-    mkdir -p build && \
-    cd build && \
-    cmake .. -GNinja \
-        -DPY_VERSION=3.10 \
-        -DWITH_GPU=ON \
-        -DWITH_TESTING=OFF \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DON_INFER=ON \
-        -DWITH_PYTHON=ON \
-        -DWITH_MKLDNN=ON \
-        -DWITH_DISTRIBUTE=OFF \
-        -DWITH_PSCORE=OFF \
-        -DCUDA_ARCH_NAME=Manual \
-        -DCUDA_ARCH_BIN="52" \
-        -DCUDA_ARCH_PTX="52" \
-        -DWITH_TENSORRT=OFF && \
-    echo "开始编译 PaddlePaddle，针对 Tesla M40 (Compute Capability 5.2) 优化" && \
-    ninja -j$(($(nproc)/2)) && \
-    cd python/dist && \
-    pip install paddlepaddle_gpu-*.whl && \
-    echo "PaddlePaddle 编译安装完成"
-
-# 8. 清理编译文件以减少镜像大小
-RUN cd /app && \
-    rm -rf Paddle && \
-    echo "清理编译文件完成"
-
-# 9. 安装项目依赖
+# 7. 安装项目依赖
 COPY . /app/
-RUN pip install --no-cache-dir -r work/requirement.txt && \
+RUN export SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True && \
+    pip install pynvml -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com && \
+    pip install --no-cache-dir -r work/requirement.txt && \
     chmod +x /app/entrypoint.sh
 
-# 10. 设置 Tesla M40 特定的运行时环境
+# 8. 设置 Tesla M40 特定的运行时环境
 ENV CUDA_VISIBLE_DEVICES=0
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+# Maxwell 架构特定环境变量
+ENV CUDA_ARCH_LIST="5.2;6.0;6.1;7.0;7.5;8.0;8.6"
+ENV PADDLE_WITH_CUDA=ON
+ENV FLAGS_fraction_of_gpu_memory_to_use=0.8
+ENV FLAGS_conv_workspace_size_limit=512
+ENV FLAGS_cudnn_exhaustive_search=1
 
-# 11. 添加 Tesla M40 验证脚本
+# 9. 添加 Tesla M40 验证脚本
 RUN echo '#!/bin/bash\n\
 echo "=== Tesla M40 环境验证 ===\"\n\
 echo "CUDA 版本:"\n\
@@ -105,7 +96,7 @@ python -c "import paddle; print(f\"GPU 设备数量: {paddle.device.cuda.device_
 echo "\n=== 验证完成 ===\"' > /app/verify_tesla_m40.sh && \
     chmod +x /app/verify_tesla_m40.sh
 
-# 12. 启动命令
+# 10. 启动命令
 CMD ["/bin/bash"]
 
 # Tesla M40 优化说明：

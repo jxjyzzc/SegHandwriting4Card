@@ -6,4 +6,5 @@ pandas
 scipy
 tqdm
 visdom
+visualdl
 scikit-learn
