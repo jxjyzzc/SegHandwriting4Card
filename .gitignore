@@ -6,3 +6,5 @@ venv/*
 .trae
 .env
 Log
+models/logs_*/vdlrecords.*.log
+models/*.log

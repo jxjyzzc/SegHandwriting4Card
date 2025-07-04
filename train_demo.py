@@ -134,7 +134,10 @@ class Session:
         # 保存统计数据到文件
         stats_file = os.path.join(self.log_dir, 'training_stats.json')
         with open(stats_file, 'w', encoding='utf-8') as f:
-            json.dump(self.training_stats, f, indent=2, ensure_ascii=False)
+            # 转换defaultdict为普通dict以支持JSON序列化
+            serializable_stats = dict(self.training_stats)
+            serializable_stats['model_stats'] = dict(serializable_stats['model_stats'])
+            json.dump(serializable_stats, f, indent=2, ensure_ascii=False)
             
     def log_model_stats(self, epoch):
         """记录模型参数统计信息"""
@@ -339,7 +342,7 @@ class Session:
         """
         # 确保数据路径正确设置
         if not hasattr(self.config, 'dataRoot') or not self.config.dataRoot:
-            extract_root = getattr(self.config, 'extract_root', '/opt/1panel/resource/apps/local/OCRAutoScore/segmentation/SegFormer4Card/data/extracted')
+            extract_root = getattr(self.config, 'extract_root', '/workspace/data/data127971')
             self.config.dataRoot = os.path.join(extract_root, 'train')
         
         train_dataset = ErasingData(self.config.dataRoot, self.config.loadSize, training=True)

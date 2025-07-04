@@ -2,7 +2,7 @@ services:
   seghandwriting-app:
     build:
       context: .
-      dockerfile: Dockerfile.tesla-m40  # 使用特制Dockerfile
+      dockerfile: build/Dockerfile.tesla-m40  # 使用特制Dockerfile
     image: seghandwriting-app:latest
     container_name: seghandwriting-app
     ports:
@@ -10,6 +10,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./work:/app/work
+      - ./models:/app/models  # 挂载模型和日志目录
       - ./entrypoint.sh:/app/entrypoint.sh
       - ./gpu_check.py:/app/gpu_check.py
       - ./data_processor.py:/app/data_processor.py

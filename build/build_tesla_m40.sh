@@ -9,7 +9,7 @@ set -e
 # 默认配置
 IMAGE_NAME="seghandwriting-app"
 IMAGE_TAG="latest"
-DOCKERFILE="Dockerfile.tesla-m40"
+DOCKERFILE="./Dockerfile.tesla-m40"
 VERBOSE=false
 NO_CACHE=false
 CLEAN_CACHE=false
